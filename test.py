@@ -77,7 +77,7 @@ async def get_room(room_id:int):
 
 
 @app.get("/room")
-async def get_all_rooms():
+def get_all_rooms():
     # 只获取 room: 开头的key，不要拿全部*
     rooms = r.keys("room:*")
     room_status = {}
