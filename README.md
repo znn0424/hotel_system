@@ -123,6 +123,7 @@ npm run dev
 | 请求方式 | 地址 | 作用 |
 | --- | --- | --- |
 | `POST` | `/admin/login` | 管理员登录并获取 JWT token。 |
+| `POST` | `/admin/register` | 注册管理员账号，密码以哈希形式保存。 |
 | `POST` | `/room/set` | 新增或更新房间状态，先写 MySQL，再更新 Redis。 |
 | `GET` | `/room/{room_id}` | 查询指定房间状态。 |
 | `GET` | `/room` | 查询全部房间状态。 |
@@ -141,4 +142,13 @@ Authorization: Bearer <token>
 1. 将房间状态写入 MySQL。
 2. MySQL 操作成功后，更新 Redis 中的 `room:{room_id}` 缓存。
 3. 如果 Redis 更新失败，接口会返回错误，但 MySQL 中已经成功保存的数据不会回滚。
+
+## 八、http异常表速查
+状态码	含义	使用场景
+400	Bad Request 请求错误	请求参数语义错误、业务校验失败（如房间状态非法）
+401	Unauthorized 未认证	管理员登录失败、Token 缺失 / Token 过期 / 用户名密码错误，需要登录
+403	Forbidden 权限不足	登录成功，但没有操作权限（普通账号不能删除房间）
+404	Not Found 资源不存在	查询房间 ID 不存在、接口地址写错
+422	Validation Error 参数校验失败	Pydantic 模型校验失败，类型错误、缺少必填字段（RequestValidationError）
+500	Internal Server Error 服务器内部错误	数据库异常、代码报错、Redis 连接失败等服务端问题
 

@@ -1,5 +1,8 @@
 from typing import Any
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import secrets
 
 import jwt
 import redis
@@ -16,7 +19,7 @@ from tortoise.contrib.fastapi import register_tortoise
 from tortoise.exceptions import DBConnectionError, IntegrityError
 
 from api.add_room import add_room
-from model import Room
+from model import Admin, Room
 from settings import (
     ADMIN_PASSWORD,
     ADMIN_USERNAME,
@@ -77,6 +80,62 @@ class AdminLogin(BaseModel):
     password: str
 
 
+class AdminRegister(BaseModel):
+    """管理员注册请求体。"""
+
+    username: str
+    password: str
+
+
+def hash_password(password: str) -> str:
+    """使用随机盐和 PBKDF2 生成密码哈希。"""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        600_000,
+    )
+    return f"{salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """校验密码，避免直接比较明文。"""
+    try:
+        salt_hex, digest_hex = password_hash.split("$", 1)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        600_000,
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+async def create_token(username: str) -> dict[str, str]:
+    """生成管理员登录使用的 JWT。"""
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=JWT_EXPIRE_MINUTES
+    )
+    token = jwt.encode(
+        {
+            "sub": username,
+            "exp": expires_at,
+        },
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+    }
+
+
 def error_response(
     status_code: int,
     message: str,
@@ -92,7 +151,7 @@ def error_response(
         },
     )
 
-
+#前端传递数据类型错误显示：请求参数校验失败
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request,
@@ -130,18 +189,21 @@ async def unhandled_exception_handler(
     )
 
 
-@app.get(
-    "/",
-    summary="打开首页",
-    description="返回酒店房态管理的服务端页面。",
-    tags=["基础"],
-)
-async def read_root(request: Request):
+@app.get("/home", summary="后端模板首页", tags=["基础"])
+async def read_home(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="home.html",
     )
 
+@app.get("/", summary="服务根路径", tags=["基础"])
+async def read_root():
+    return {
+        "msg": "酒店房态系统后端服务已启动",
+        "home_page": "http://127.0.0.1:8001/home",
+        "api": "http://127.0.0.1:8001/api",
+        "frontend": "http://localhost:5173"
+    }
 
 @app.post(
     "/admin/login",
@@ -150,26 +212,75 @@ async def read_root(request: Request):
     tags=["管理员"],
 )
 async def admin_login(data: AdminLogin):
-    if data.username != ADMIN_USERNAME or data.password != ADMIN_PASSWORD:
+    username = data.username.strip()
+    admin = await Admin.get_or_none(username=username)
+
+    # 保留 settings.py 中的开发环境账号，避免升级后原账号无法登录。
+    valid = (
+        username == ADMIN_USERNAME and data.password == ADMIN_PASSWORD
+        if admin is None
+        else verify_password(data.password, admin.password_hash)
+    )
+    if not valid:
         raise HTTPException(
             status_code=401,
             detail="用户名或密码错误",
         )
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=JWT_EXPIRE_MINUTES
-    )
-    token = jwt.encode(
-        {
-            "sub": data.username,
-            "exp": expires_at,
-        },
-        JWT_SECRET_KEY,
-        algorithm=JWT_ALGORITHM,
-    )
+    return await create_token(username)
+
+
+@app.post(
+    "/admin/register",
+    summary="注册管理员账号",
+    description="创建新的管理员账号，密码以哈希形式保存到 MySQL。",
+    tags=["管理员"],
+)
+async def admin_register(data: AdminRegister):
+    username = data.username.strip()
+    password = data.password
+
+    if len(username) < 3 or len(username) > 50:
+        raise HTTPException(
+            status_code=400,
+            detail="用户名长度必须为 3 到 50 个字符",
+        )
+    if len(password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="密码长度不能少于 6 个字符",
+        )
+    if username == ADMIN_USERNAME:
+        raise HTTPException(
+            status_code=409,
+            detail="该用户名已存在",
+        )
+
+    try:
+        if await Admin.exists(username=username):
+            raise HTTPException(
+                status_code=409,
+                detail="该用户名已存在",
+            )
+
+        await Admin.create(
+            username=username,
+            password_hash=hash_password(password),
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="该用户名已存在",
+        ) from exc
+    except DBConnectionError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="管理员账号写入数据库失败",
+        ) from exc
+
     return {
-        "access_token": token,
-        "token_type": "bearer",
+        "message": "注册成功，请使用新账号登录",
+        "username": username,
     }
 
 
